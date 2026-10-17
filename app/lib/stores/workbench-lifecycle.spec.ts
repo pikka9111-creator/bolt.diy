@@ -4,12 +4,17 @@ import { FilesStore } from './files';
 import type { ArtifactState } from './workbench';
 
 vi.mock('~/lib/persistence', () => ({ description: atom(undefined) }));
-vi.mock('~/lib/webcontainer', () => ({ webcontainer: Promise.resolve({ workdir: '/home/project' }) }));
 vi.mock('./files', () => ({
   FilesStore: class {
     files = map({});
     reset() {
       return Promise.resolve();
+    }
+    getFile() {
+      return undefined;
+    }
+    createFile() {
+      return Promise.resolve(true);
     }
   },
 }));

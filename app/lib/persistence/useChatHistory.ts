@@ -20,7 +20,6 @@ import type { Snapshot } from './types';
 import type { FileMap } from '~/lib/stores/files';
 import { logStore } from '~/lib/stores/logs'; // Import logStore
 import { workbenchStore } from '~/lib/stores/workbench';
-import { webcontainer } from '~/lib/webcontainer';
 import type { ContextAnnotation } from '~/types/context';
 import { detectProjectCommands, createCommandActionsString } from '~/utils/projectCommands';
 

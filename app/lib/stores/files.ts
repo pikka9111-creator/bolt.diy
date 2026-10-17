@@ -6,7 +6,6 @@
  */
 // eslint-disable-next-line unicorn/prefer-node-protocol
 import { Buffer } from 'buffer';
-import type { PathWatcherEvent, WebContainer } from '@webcontainer/api';
 import { getEncoding } from 'istextorbinary';
 import { map, type MapStore } from 'nanostores';
 import {
@@ -53,8 +52,6 @@ type Dirent = File | Folder;
 export type FileMap = Record<string, Dirent | undefined>;
 
 export class FilesStore {
-  #webcontainer: Promise<WebContainer>;
-
   /**
    * Tracks the number of files without folders.
    */
@@ -81,9 +78,7 @@ export class FilesStore {
     return this.#size;
   }
 
-  constructor(webcontainerPromise: Promise<WebContainer>) {
-    this.#webcontainer = webcontainerPromise;
-
+  constructor() {
     // Load deleted paths from localStorage if available
     try {
       if (typeof localStorage !== 'undefined') {
@@ -610,43 +605,17 @@ export class FilesStore {
     this.#modifiedFiles.clear();
     this.#deletedPaths.clear();
     this.#persistDeletedPaths();
-
-    const container = await this.#webcontainer;
-
-    try {
-      for (const entry of await container.fs.readdir('.')) {
-        await container.fs.rm(entry, { recursive: true });
-      }
-    } catch (error) {
-      logger.error('Failed to empty the working directory', error);
-    }
   }
 
   async saveFile(filePath: string, content: string) {
-    const webcontainer = await this.#webcontainer;
-
     try {
-      const relativePath = path.relative(webcontainer.workdir, filePath);
-
-      if (!relativePath) {
-        throw new Error(`EINVAL: invalid file path, write '${relativePath}'`);
-      }
-
       const oldContent = this.getFile(filePath)?.content;
 
-      if (!oldContent && oldContent !== '') {
-        unreachable('Expected content to be defined');
+      if (oldContent === undefined && oldContent !== '') {
+        // New file
       }
 
-      const parentPath = path.dirname(relativePath);
-
-      if (parentPath !== '.') {
-        await webcontainer.fs.mkdir(parentPath, { recursive: true });
-      }
-
-      await webcontainer.fs.writeFile(relativePath, content);
-
-      if (!this.#modifiedFiles.has(filePath)) {
+      if (oldContent !== undefined && !this.#modifiedFiles.has(filePath)) {
         this.#modifiedFiles.set(filePath, oldContent);
       }
 
@@ -654,7 +623,6 @@ export class FilesStore {
       const currentFile = this.files.get()[filePath];
       const isLocked = currentFile?.type === 'file' ? currentFile.isLocked : false;
 
-      // we immediately update the file and don't rely on the `change` event coming from the watcher
       this.files.setKey(filePath, {
         type: 'file',
         content,
@@ -665,26 +633,13 @@ export class FilesStore {
       logger.info('File updated');
     } catch (error) {
       logger.error('Failed to update file content\n\n', error);
-
       throw error;
     }
   }
 
   async #init() {
-    const webcontainer = await this.#webcontainer;
-
     // Clean up any files that were previously deleted
     this.#cleanupDeletedFiles();
-
-    // Set up file watcher
-    webcontainer.internal.watchPaths(
-      {
-        include: [`${WORK_DIR}/**`],
-        exclude: ['**/node_modules', '.git', '**/package-lock.json'],
-        includeContent: true,
-      },
-      bufferWatchEvents(100, this.#processEventBuffer.bind(this)),
-    );
 
     // Get the current chat ID
     const currentChatId = getCurrentChatId();
@@ -695,25 +650,15 @@ export class FilesStore {
     // Load locked files immediately for the current chat
     this.#loadLockedFiles(currentChatId);
 
-    /**
-     * Also set up a timer to load locked files again after a delay.
-     * This ensures that locks are applied even if files are loaded asynchronously.
-     */
     setTimeout(() => {
       this.#loadLockedFiles(currentChatId);
     }, 2000);
 
-    /**
-     * Set up a less frequent periodic check to ensure locks remain applied.
-     * This is now less critical since we have the storage event listener.
-     */
     setInterval(() => {
-      // Clear the cache to force a fresh read from localStorage
       clearCache();
-
       const latestChatId = getCurrentChatId();
       this.#loadLockedFiles(latestChatId);
-    }, 30000); // Reduced from 10s to 30s
+    }, 30000);
   }
 
   /**
@@ -850,26 +795,10 @@ export class FilesStore {
   }
 
   async createFile(filePath: string, content: string | Uint8Array = '') {
-    const webcontainer = await this.#webcontainer;
-
     try {
-      const relativePath = path.relative(webcontainer.workdir, filePath);
-
-      if (!relativePath) {
-        throw new Error(`EINVAL: invalid file path, create '${relativePath}'`);
-      }
-
-      const dirPath = path.dirname(relativePath);
-
-      if (dirPath !== '.') {
-        await webcontainer.fs.mkdir(dirPath, { recursive: true });
-      }
-
       const isBinary = content instanceof Uint8Array;
 
       if (isBinary) {
-        await webcontainer.fs.writeFile(relativePath, Buffer.from(content));
-
         const base64Content = Buffer.from(content).toString('base64');
         this.files.setKey(filePath, {
           type: 'file',
@@ -880,8 +809,6 @@ export class FilesStore {
 
         this.#modifiedFiles.set(filePath, base64Content);
       } else {
-        await webcontainer.fs.writeFile(relativePath, content as string);
-
         this.files.setKey(filePath, {
           type: 'file',
           content: content as string,
@@ -892,6 +819,7 @@ export class FilesStore {
         this.#modifiedFiles.set(filePath, content as string);
       }
 
+      this.#size++;
       logger.info(`File created: ${filePath}`);
 
       return true;
@@ -902,17 +830,7 @@ export class FilesStore {
   }
 
   async createFolder(folderPath: string) {
-    const webcontainer = await this.#webcontainer;
-
     try {
-      const relativePath = path.relative(webcontainer.workdir, folderPath);
-
-      if (!relativePath) {
-        throw new Error(`EINVAL: invalid folder path, create '${relativePath}'`);
-      }
-
-      await webcontainer.fs.mkdir(relativePath, { recursive: true });
-
       this.files.setKey(folderPath, { type: 'folder' });
 
       logger.info(`Folder created: ${folderPath}`);
@@ -925,21 +843,11 @@ export class FilesStore {
   }
 
   async deleteFile(filePath: string) {
-    const webcontainer = await this.#webcontainer;
-
     try {
-      const relativePath = path.relative(webcontainer.workdir, filePath);
-
-      if (!relativePath) {
-        throw new Error(`EINVAL: invalid file path, delete '${relativePath}'`);
-      }
-
-      await webcontainer.fs.rm(relativePath);
-
       this.#deletedPaths.add(filePath);
 
       this.files.setKey(filePath, undefined);
-      this.#size--;
+      this.#size = Math.max(0, this.#size - 1);
 
       if (this.#modifiedFiles.has(filePath)) {
         this.#modifiedFiles.delete(filePath);
@@ -957,17 +865,7 @@ export class FilesStore {
   }
 
   async deleteFolder(folderPath: string) {
-    const webcontainer = await this.#webcontainer;
-
     try {
-      const relativePath = path.relative(webcontainer.workdir, folderPath);
-
-      if (!relativePath) {
-        throw new Error(`EINVAL: invalid folder path, delete '${relativePath}'`);
-      }
-
-      await webcontainer.fs.rm(relativePath, { recursive: true });
-
       this.#deletedPaths.add(folderPath);
 
       this.files.setKey(folderPath, undefined);
@@ -981,7 +879,7 @@ export class FilesStore {
           this.#deletedPaths.add(path);
 
           if (dirent?.type === 'file') {
-            this.#size--;
+            this.#size = Math.max(0, this.#size - 1);
           }
 
           if (dirent?.type === 'file' && this.#modifiedFiles.has(path)) {
