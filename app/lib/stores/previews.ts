@@ -1,4 +1,3 @@
-import type { WebContainer } from '@webcontainer/api';
 import { atom } from 'nanostores';
 
 // Extend Window interface to include our custom property
@@ -19,7 +18,6 @@ const PREVIEW_CHANNEL = 'preview-updates';
 
 export class PreviewsStore {
   #availablePreviews = new Map<number, PreviewInfo>();
-  #webcontainer: Promise<WebContainer>;
   #broadcastChannel?: BroadcastChannel;
   #lastUpdate = new Map<string, number>();
   #watchedFiles = new Set<string>();
@@ -29,8 +27,7 @@ export class PreviewsStore {
 
   previews = atom<PreviewInfo[]>([]);
 
-  constructor(webcontainerPromise: Promise<WebContainer>) {
-    this.#webcontainer = webcontainerPromise;
+  constructor() {
     this.#broadcastChannel = this.#maybeCreateChannel(PREVIEW_CHANNEL);
     this.#storageChannel = this.#maybeCreateChannel('storage-sync-channel');
 
@@ -71,8 +68,6 @@ export class PreviewsStore {
         this._broadcastStorageSync();
       };
     }
-
-    this.#init();
   }
 
   #maybeCreateChannel(name: string): BroadcastChannel | undefined {
@@ -166,46 +161,20 @@ export class PreviewsStore {
     }
   }
 
-  async #init() {
-    const webcontainer = await this.#webcontainer;
+  addPreview(port: number, baseUrl: string) {
+    let previewInfo = this.#availablePreviews.get(port);
+    const previews = this.previews.get();
 
-    // Listen for server ready events
-    webcontainer.on('server-ready', (port, url) => {
-      console.log('[Preview] Server ready on port:', port, url);
-      this.broadcastUpdate(url);
+    if (!previewInfo) {
+      previewInfo = { port, ready: true, baseUrl };
+      this.#availablePreviews.set(port, previewInfo);
+      previews.push(previewInfo);
+    } else {
+      previewInfo.ready = true;
+      previewInfo.baseUrl = baseUrl;
+    }
 
-      // Initial storage sync when preview is ready
-      this._broadcastStorageSync();
-    });
-
-    // Listen for port events
-    webcontainer.on('port', (port, type, url) => {
-      let previewInfo = this.#availablePreviews.get(port);
-
-      if (type === 'close') {
-        this.#availablePreviews.delete(port);
-        this.previews.set(this.previews.get().filter((preview) => preview.port !== port));
-
-        return;
-      }
-
-      const previews = this.previews.get();
-
-      if (!previewInfo) {
-        previewInfo = { port, ready: type === 'open', baseUrl: url };
-        this.#availablePreviews.set(port, previewInfo);
-        previews.push(previewInfo);
-      }
-
-      previewInfo.ready = type === 'open';
-      previewInfo.baseUrl = url;
-
-      this.previews.set([...previews]);
-
-      if (type === 'open') {
-        this.broadcastUpdate(url);
-      }
-    });
+    this.previews.set([...previews]);
   }
 
   // Helper to extract preview ID from URL
@@ -313,11 +282,7 @@ let previewsStore: PreviewsStore | null = null;
 
 export function usePreviewStore() {
   if (!previewsStore) {
-    /*
-     * Initialize with a Promise that resolves to WebContainer
-     * This should match how you're initializing WebContainer elsewhere
-     */
-    previewsStore = new PreviewsStore(Promise.resolve({} as WebContainer));
+    previewsStore = new PreviewsStore();
   }
 
   return previewsStore;

@@ -112,7 +112,6 @@ export default defineConfig((config) => {
         '@xterm/xterm',
         '@xterm/addon-fit',
         '@xterm/addon-web-links',
-        '@webcontainer/api',
         'diff',
         'date-fns',
         'js-cookie',

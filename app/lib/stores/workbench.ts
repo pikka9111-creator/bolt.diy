@@ -11,7 +11,6 @@ import type { EditorDocument, ScrollPosition } from '~/components/editor/codemir
 import { description } from '~/lib/persistence';
 import { ActionRunner } from '~/lib/runtime/action-runner';
 import type { ActionCallbackData, ArtifactCallbackData } from '~/lib/runtime/message-parser';
-import { webcontainer } from '~/lib/webcontainer';
 import type { ActionAlert, BoltAction, DeployAlert, SupabaseAlert } from '~/types/actions';
 import type { ITerminal } from '~/types/terminal';
 import { extractRelativePath } from '~/utils/diff';
@@ -38,10 +37,10 @@ type Artifacts = MapStore<Record<string, ArtifactState>>;
 export type WorkbenchViewType = 'code' | 'diff' | 'preview';
 
 export class WorkbenchStore {
-  #previewsStore = new PreviewsStore(webcontainer);
-  #filesStore = new FilesStore(webcontainer);
+  #previewsStore = new PreviewsStore();
+  #filesStore = new FilesStore();
   #editorStore = new EditorStore(this.#filesStore);
-  #terminalStore = new TerminalStore(webcontainer);
+  #terminalStore = new TerminalStore();
 
   #reloadedMessages = new Set<string>();
 
@@ -696,7 +695,6 @@ export class WorkbenchStore {
       closed: false,
       type,
       runner: new ActionRunner(
-        webcontainer,
         () => this.boltTerminal,
         (alert) => {
           if (this.#reloadedMessages.has(messageId)) {
@@ -827,21 +825,11 @@ export class WorkbenchStore {
         return;
       }
 
-      const wc = await webcontainer;
-
       if (generation !== this.#actionGeneration) {
         return;
       }
 
-      const fullPath = path.isAbsolute(data.action.filePath)
-        ? path.normalize(data.action.filePath)
-        : path.join(wc.workdir, data.action.filePath);
-
-      const relativePath = path.relative(wc.workdir, fullPath);
-
-      if (relativePath === '..' || relativePath.startsWith('../') || path.isAbsolute(relativePath)) {
-        throw new Error(`Cannot update file outside the project directory: ${data.action.filePath}`);
-      }
+      const fullPath = path.normalize(data.action.filePath);
 
       /*
        * For scoped locks, we would need to implement diff checking here

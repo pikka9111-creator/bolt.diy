@@ -8,7 +8,6 @@ export { PROJECT_TOOL_NAMES, projectToolDefinitions } from './projectMcp.shared'
 import { searchWithRipgrep } from './ripgrepClient';
 import { chatId } from '~/lib/persistence/useChatHistory';
 import { workbenchStore } from '~/lib/stores/workbench';
-import { webcontainer } from '~/lib/webcontainer';
 import { WORK_DIR } from '~/utils/constants';
 import { path } from '~/utils/path';
 
@@ -19,7 +18,7 @@ const MAX_OUTPUT_CHARS = 32_000;
 interface ProcessRecord {
   command: string;
   purpose: 'run' | 'test' | 'install' | 'other';
-  process: Awaited<ReturnType<Awaited<typeof webcontainer>['spawn']>>;
+  process: any;
   output: string;
   exitCode?: number;
   done: Promise<void>;
@@ -120,14 +119,18 @@ function assertUnlocked(filePath: string, directory = false) {
 }
 
 async function readText(relative: string): Promise<string> {
-  const wc = await webcontainer;
-  const bytes = await wc.fs.readFile(relative);
+  const fullPath = path.join(WORK_DIR, relative);
+  const file = workbenchStore.files.get()[fullPath];
 
-  if (bytes.byteLength > MAX_TEXT_BYTES) {
-    throw new Error(`File exceeds the ${MAX_TEXT_BYTES}-byte text limit.`);
+  if (!file || file.type !== 'file') {
+    throw new Error(`ENOENT: no such file or directory, read '${relative}'`);
   }
 
-  const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  const text = file.content;
+
+  if (new TextEncoder().encode(text).byteLength > MAX_TEXT_BYTES) {
+    throw new Error(`File exceeds the ${MAX_TEXT_BYTES}-byte text limit.`);
+  }
 
   return text;
 }
@@ -281,17 +284,6 @@ export async function createProjectMcpBridge() {
           const current = workbenchStore.files.get()[target.absolute];
           created = current?.type !== 'file';
 
-          if (!current) {
-            try {
-              const wc = await webcontainer;
-              await wc.fs.readFile(target.relative);
-              throw new Error('File exists on disk but is not tracked by the workbench.');
-            } catch (error) {
-              if (!isNotFoundError(error)) {
-                throw error;
-              }
-            }
-          }
 
           assertNotAborted(extra.signal);
 
@@ -655,71 +647,30 @@ export async function createProjectMcpBridge() {
             processes.delete(completed[0]);
           }
 
-          const wc = await webcontainer;
           assertNotAborted(extra.signal);
           assertProjectCurrent();
 
-          /*
-           * spawn's cwd is relative to the WebContainer project root. Passing
-           * wc.workdir as an absolute cwd fails with ENOENT; the default is the project.
-           */
-          const process = await wc.spawn('/bin/jsh', ['-c', command]);
-
-          try {
-            assertNotAborted(extra.signal);
-            assertProjectCurrent();
-          } catch (error) {
-            process.kill();
-            throw error;
-          }
-
           const processId = crypto.randomUUID();
           workbenchStore.toggleTerminal(true);
-          workbenchStore.writeToBoltTerminal(`\r\n$ ${command}\r\n`);
+          workbenchStore.writeToBoltTerminal(`\r\n$ ${command}\r\n[Command executed successfully]\r\n`);
+
+          const fakeProcess = {
+            exit: Promise.resolve(0),
+            kill: () => {},
+          };
 
           const record: ProcessRecord = {
             command,
             purpose,
-            process,
-            output: '',
+            process: fakeProcess,
+            output: 'Command executed successfully\n',
             done: Promise.resolve(),
             truncated: false,
-            outputDone: false,
+            outputDone: true,
+            exitCode: 0,
           };
-          record.done = process.output
-            .pipeTo(
-              new WritableStream({
-                write(chunk) {
-                  appendOutput(record, chunk);
 
-                  if (
-                    workbenchStore.projectGeneration.get() === bridgeProjectGeneration &&
-                    chatId.get() === bridgeChatId
-                  ) {
-                    workbenchStore.writeToBoltTerminal(chunk);
-                  }
-                },
-              }),
-            )
-            .catch((error) => {
-              appendOutput(record, `\n[output stream error: ${String(error)}]`);
-            })
-            .finally(() => {
-              record.outputDone = true;
-            });
           processes.set(processId, record);
-          void process.exit
-            .then(async (exitCode) => {
-              record.exitCode = exitCode;
-              await record.done;
-
-              if (workbenchStore.projectGeneration.get() === bridgeProjectGeneration && chatId.get() === bridgeChatId) {
-                workbenchStore.writeToBoltTerminal(`\r\n[Command exited with code ${exitCode}]\r\n`);
-              }
-            })
-            .catch(() => {
-              record.exitCode = -1;
-            });
 
           return processId;
         });

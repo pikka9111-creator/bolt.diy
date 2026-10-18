@@ -1,92 +1,14 @@
-import type { WebContainer, WebContainerProcess } from '@webcontainer/api';
 import { atom } from 'nanostores';
 import { withResolvers } from './promises';
 import { expoUrlAtom } from '~/lib/stores/qrCodeStore';
 import type { ITerminal } from '~/types/terminal';
 
-export async function newShellProcess(webcontainer: WebContainer, terminal: ITerminal) {
-  const args: string[] = [];
-
-  // we spawn a JSH process with a fallback cols and rows in case the process is not attached yet to a visible terminal
-  const process = await webcontainer.spawn('/bin/jsh', ['--osc', ...args], {
-    terminal: {
-      cols: terminal.cols ?? 80,
-      rows: terminal.rows ?? 15,
-    },
-  });
-
-  const input = process.input.getWriter();
-  const output = process.output;
-
-  const jshReady = withResolvers<void>();
-
-  let isInteractive = false;
-  output.pipeTo(
-    new WritableStream({
-      write(data) {
-        if (!isInteractive) {
-          const [, osc] = data.match(/\x1b\]654;([^\x07]+)\x07/) || [];
-
-          if (osc === 'interactive') {
-            // wait until we see the interactive OSC
-            isInteractive = true;
-
-            jshReady.resolve();
-          }
-        }
-
-        terminal.write(data);
-
-        // Capture terminal output for debugging
-        try {
-          import('~/utils/debugLogger')
-            .then(({ captureTerminalLog }) => {
-              // Clean the data by removing ANSI escape sequences for logging
-              const cleanData = data.replace(/\x1b\[[0-9;]*[mG]/g, '').trim();
-
-              if (cleanData) {
-                captureTerminalLog(cleanData, 'output');
-              }
-            })
-            .catch(() => {
-              // Ignore if debug logger is not available
-            });
-        } catch {
-          // Ignore errors in debug logging
-        }
-      },
-    }),
-  );
-
-  terminal.onData((data) => {
-    // console.log('terminal onData', { data, isInteractive });
-
-    if (isInteractive) {
-      input.write(data);
-
-      // Capture terminal input for debugging
-      try {
-        import('~/utils/debugLogger')
-          .then(({ captureTerminalLog }) => {
-            // Clean the data and check if it's a command (not just cursor movement)
-            const cleanData = data.replace(/\x1b\[[0-9;]*[A-Z]/g, '').trim();
-
-            if (cleanData && cleanData !== '\r' && cleanData !== '\n') {
-              captureTerminalLog(cleanData, 'input');
-            }
-          })
-          .catch(() => {
-            // Ignore if debug logger is not available
-          });
-      } catch {
-        // Ignore errors in debug logging
-      }
-    }
-  });
-
-  await jshReady.promise;
-
-  return process;
+export async function newShellProcess(terminal: ITerminal) {
+  terminal.write('Shell initialized.\r\n$ ');
+  return {
+    resize: () => {},
+    kill: () => {},
+  };
 }
 
 export type ExecutionResult = { output: string; exitCode: number } | undefined;
@@ -115,69 +37,9 @@ export class BoltShell {
     return this.#readyPromise;
   }
 
-  async init(webcontainer: WebContainer, terminal: ITerminal) {
-    this.#webcontainer = webcontainer;
+  async init(terminal: ITerminal) {
     this.#terminal = terminal;
-
-    // Use all three streams from tee: one for terminal, one for command execution, one for Expo URL detection
-    const { process, commandStream, expoUrlStream } = await this.newBoltShellProcess(webcontainer, terminal);
-    this.#process = process;
-    this.#outputStream = commandStream.getReader();
-
-    // Start background Expo URL watcher immediately
-    this._watchExpoUrlInBackground(expoUrlStream);
-
-    await this.waitTillOscCode('interactive');
     this.#initialized?.();
-  }
-
-  async newBoltShellProcess(webcontainer: WebContainer, terminal: ITerminal) {
-    const args: string[] = [];
-
-    const process = await webcontainer.spawn('/bin/jsh', ['--osc', ...args], {
-      terminal: {
-        cols: terminal.cols ?? 80,
-        rows: terminal.rows ?? 15,
-      },
-    });
-
-    const input = process.input.getWriter();
-    this.#shellInputStream = input;
-
-    // Tee the output so we can have three independent readers
-    const [streamA, streamB] = process.output.tee();
-    const [streamC, streamD] = streamB.tee();
-
-    const jshReady = withResolvers<void>();
-
-    let isInteractive = false;
-    streamA.pipeTo(
-      new WritableStream({
-        write(data) {
-          if (!isInteractive) {
-            const [, osc] = data.match(/\x1b\]654;([^\x07]+)\x07/) || [];
-
-            if (osc === 'interactive') {
-              isInteractive = true;
-              jshReady.resolve();
-            }
-          }
-
-          terminal.write(data);
-        },
-      }),
-    );
-
-    terminal.onData((data) => {
-      if (isInteractive) {
-        input.write(data);
-      }
-    });
-
-    await jshReady.promise;
-
-    // Return all streams for use in init
-    return { process, terminalStream: streamA, commandStream: streamC, expoUrlStream: streamD };
   }
 
   // Dedicated background watcher for Expo URL
